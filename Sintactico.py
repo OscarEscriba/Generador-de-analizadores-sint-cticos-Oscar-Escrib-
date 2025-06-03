@@ -1,12 +1,7 @@
-#!/usr/bin/env python3
-"""
-YAPar - Yet Another Parser
-Generador de Analizadores Sintácticos SLR(1)
-Universidad del Valle de Guatemala
-"""
 
 import sys
 import json
+import os
 from typing import Dict, List, Set, Tuple, Optional, Union
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -54,7 +49,39 @@ class Item:
         """Retorna un nuevo item con el punto avanzado"""
         return Item(self.production, self.dot_position + 1)
 
-class YAParParser:
+class YALexProcessor:
+    """Procesador de archivos YALex para generar tokens"""
+    
+    def __init__(self):
+        self.tokens = []
+        
+    def process_yalex_file(self, filename: str) -> List[str]:
+        """Procesa un archivo .yalex y extrae los tokens definidos"""
+        if not os.path.exists(filename):
+            print(f"Advertencia: Archivo YALex '{filename}' no encontrado")
+            return []
+        
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Buscar definiciones de tokens en formato YALex
+            # Formato típico: token_name = "pattern"
+            tokens = []
+            lines = content.split('\n')
+            
+            for line in lines:
+                line = line.strip()
+                if '=' in line and not line.startswith('//') and not line.startswith('/*'):
+                    # Extraer nombre del token
+                    token_name = line.split('=')[0].strip()
+                    if token_name and token_name.isupper():
+                        tokens.append(token_name)
+            
+            return tokens
+        except Exception as e:
+            print(f"Error procesando archivo YALex: {e}")
+            return []
     """Parser para archivos .yalp"""
     
     def __init__(self):
@@ -70,12 +97,25 @@ class YAParParser:
         # Remover comentarios
         content = self._remove_comments(content)
         
-        # Dividir en secciones
-        sections = content.split('%%')
-        if len(sections) != 2:
+        # Dividir en secciones - buscar %% como línea separada
+        lines = content.split('\n')
+        separator_found = False
+        separator_index = -1
+        
+        for i, line in enumerate(lines):
+            if line.strip() == '%%':
+                if separator_found:
+                    raise ValueError("El archivo tiene múltiples líneas %% - debe tener exactamente una")
+                separator_found = True
+                separator_index = i
+        
+        if not separator_found:
             raise ValueError("El archivo debe tener exactamente una línea %% separando tokens y producciones")
         
-        tokens_section, productions_section = sections
+        tokens_section = '\n'.join(lines[:separator_index])
+        productions_section = '\n'.join(lines[separator_index + 1:])
+        
+        tokens_section, productions_section = tokens_section, productions_section
         
         # Parsear tokens
         self._parse_tokens(tokens_section.strip())
@@ -173,8 +213,16 @@ class SLR1Parser:
         
         # Agregar producción inicial
         if self.start_symbol:
-            start_production = Production("S'", [self.start_symbol])
+            # Evitar conflicto con símbolos existentes
+            augmented_start = "S'"
+            while augmented_start in self.non_terminals:
+                augmented_start += "'"
+            start_production = Production(augmented_start, [self.start_symbol])
             self.productions.insert(0, start_production)
+            self.non_terminals.add(augmented_start)  # <== ESTA LÍNEA ES CLAVE
+            self.augmented_start = augmented_start
+        else:
+            raise ValueError("No se encontró símbolo inicial en la gramática")
         
         # Calcular conjuntos FIRST y FOLLOW
         self.first_sets = {}
@@ -191,14 +239,27 @@ class SLR1Parser:
     
     def _calculate_symbols(self):
         """Calcula terminales y no-terminales"""
+        # Paso 1: registrar no terminales (todos los lados izquierdos)
         for production in self.productions:
             self.non_terminals.add(production.left)
-            if self.start_symbol is None and production.left != "S'":
-                self.start_symbol = production.left
-            
+
+        # Asignar el símbolo inicial
+        if not self.start_symbol:
+            for production in self.productions:
+                if not production.left.endswith("'"):
+                    self.start_symbol = production.left
+                    break
+
+        # Paso 2: clasificar símbolos del lado derecho
+        for production in self.productions:
             for symbol in production.right:
-                if symbol not in self.non_terminals and symbol in self.tokens:
+                if symbol in self.tokens:
                     self.terminals.add(symbol)
+                elif symbol not in self.non_terminals:
+                    # Podría ser epsilon o un error real, dependiendo del diseño
+                    if symbol != 'ε':
+                        print(f"Advertencia: Símbolo '{symbol}' no reconocido ni como token ni como no-terminal")
+
         
         # Agregar $ como terminal especial
         self.terminals.add('$')
@@ -385,22 +446,215 @@ class SLR1Parser:
         for state_idx, state in enumerate(self.states):
             for item in state:
                 if item.is_complete():
-                    if item.production.left == "S'" and item.production.right == [self.start_symbol]:
+                    if item.production.left == self.augmented_start and len(item.production.right) == 1:
                         # Item de aceptación
                         self.action_table[(state_idx, '$')] = ('accept', None)
-                    else:
                         # Item de reducción
                         prod_idx = self.productions.index(item.production)
                         for terminal in self.follow_sets.get(item.production.left, set()):
                             if (state_idx, terminal) in self.action_table:
                                 print(f"Conflicto en estado {state_idx}, terminal {terminal}")
                             self.action_table[(state_idx, terminal)] = ('reduce', prod_idx)
+                    else:
+                        prod_idx = self.productions.index(item.production)
+                        for terminal in self.follow_sets.get(item.production.left, set()):
+                            if (state_idx, terminal) in self.action_table:
+                                print(f"Conflicto en estado {state_idx}, terminal {terminal}")
+                                self.action_table[(state_idx, terminal)] = ('reduce', prod_idx)
                 else:
                     # Item de desplazamiento
                     next_sym = item.next_symbol()
                     if next_sym in self.terminals and (state_idx, next_sym) in self.goto_table:
                         target_state = self.goto_table[(state_idx, next_sym)]
                         self.action_table[(state_idx, next_sym)] = ('shift', target_state)
+    
+    def print_automaton(self):
+        """Imprime el autómata LR(0)"""
+        print("=== AUTÓMATA LR(0) ===")
+        for i, state in enumerate(self.states):
+            print(f"\nEstado {i}:")
+            for item in sorted(state, key=str):
+                print(f"  {item}")
+        
+        print("\n=== TABLA GOTO ===")
+        for (state, symbol), target in sorted(self.goto_table.items()):
+            print(f"GOTO({state}, {symbol}) = {target}")
+        
+        print("\n=== TABLA DE ACCIÓN ===")
+        for (state, symbol), (action, param) in sorted(self.action_table.items()):
+            if action == 'shift':
+                print(f"ACTION({state}, {symbol}) = shift {param}")
+            elif action == 'reduce':
+                print(f"ACTION({state}, {symbol}) = reduce {param}")
+            else:
+                print(f"ACTION({state}, {symbol}) = {action}")
+    
+    def print_first_follow(self):
+        """Imprime los conjuntos FIRST y FOLLOW"""
+        print("\n=== CONJUNTOS FIRST ===")
+        for symbol in sorted(self.first_sets.keys()):
+            print(f"FIRST({symbol}) = {{{', '.join(sorted(self.first_sets[symbol]))}}}")
+        
+        print("\n=== CONJUNTOS FOLLOW ===")
+        for symbol in sorted(self.follow_sets.keys()):
+            print(f"FOLLOW({symbol}) = {{{', '.join(sorted(self.follow_sets[symbol]))}}}")
+    
+    def parse_string(self, tokens: List[str]) -> bool:
+        """Parsea una cadena de tokens"""
+        print(f"\n=== PARSEANDO: {' '.join(tokens)} ===")
+        
+        stack = [0]  # Pila con estados
+        tokens = tokens + ['$']  # Agregar fin de cadena
+        position = 0
+        
+        print(f"{'Paso':<4} {'Pila':<15} {'Entrada':<15} {'Acción'}")
+        print("-" * 50)
+        
+        step = 0
+        while True:
+            current_state = stack[-1]
+            current_token = tokens[position] if position < len(tokens) else '$'
+            
+            print(f"{step:<4} {str(stack):<15} {' '.join(tokens[position:]):<15} ", end="")
+            
+            if (current_state, current_token) not in self.action_table:
+                print("ERROR: Acción no definida")
+                return False
+            
+            action, param = self.action_table[(current_state, current_token)]
+            
+            if action == 'shift':
+                print(f"shift {param}")
+                stack.append(param)
+                position += 1
+            elif action == 'reduce':
+                production = self.productions[param]
+                print(f"reduce {param} ({production})")
+                
+                # Remover símbolos de la pila
+                for _ in range(len(production.right)):
+                    if len(stack) > 1:
+                        stack.pop()
+                
+                # Buscar nuevo estado con GOTO
+                top_state = stack[-1]
+                if (top_state, production.left) in self.goto_table:
+                    new_state = self.goto_table[(top_state, production.left)]
+                    stack.append(new_state)
+                else:
+                    print("ERROR: GOTO no definido")
+                    return False
+            elif action == 'accept':
+                print("ACEPTAR")
+                return True
+            else:
+                print(f"ERROR: Acción desconocida {action}")
+                return False
+            
+            step += 1
+            if step > 100:  # Evitar bucles infinitos
+                print("ERROR: Demasiados pasos")
+                return False
+
+def main():
+    """Función principal"""
+    if len(sys.argv) < 2:
+        print("Uso: python yapar.py archivo.yalp [opciones]")
+        print("Opciones:")
+        print("  -l archivo.yalex    Archivo YALex para tokens")
+        print("  -t 'cadena'         Parsear cadena de tokens")
+        print("  -f archivo.txt      Parsear cadenas desde archivo")
+        print("  -o salida          Archivo de salida (opcional)")
+        sys.exit(1)
+    
+    yapar_file = sys.argv[1]
+    yalex_file = None
+    output_file = None
+    
+    try:
+        # Parsear archivo YAPar
+        parser = YALexProcessor()
+        tokens, ignore_tokens, productions = parser.parse_file(yapar_file)
+        
+        # Procesar argumentos
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == '-l' and i + 1 < len(sys.argv):
+                yalex_file = sys.argv[i + 1]
+                i += 2
+            elif sys.argv[i] == '-o' and i + 1 < len(sys.argv):
+                output_file = sys.argv[i + 1]
+                i += 2
+            else:
+                break
+        
+        # Procesar YALex si se proporciona
+        if yalex_file:
+            yalex_processor = YALexProcessor()
+            yalex_tokens = yalex_processor.process_yalex_file(yalex_file)
+            if yalex_tokens:
+                print(f"=== TOKENS DESDE YALEX ===")
+                print(f"Tokens encontrados: {yalex_tokens}")
+                # Combinar tokens de ambas fuentes
+                all_tokens = list(set(tokens + yalex_tokens))
+            else:
+                all_tokens = tokens
+        else:
+            all_tokens = tokens
+        
+        print("=== TOKENS ===")
+        print(f"Tokens: {all_tokens}")
+        print(f"Ignorar: {ignore_tokens}")
+        
+        print("\n=== PRODUCCIONES ===")
+        for i, prod in enumerate(productions):
+            print(f"{i}: {prod}")
+        
+        # Crear parser SLR(1)
+        try:
+            slr_parser = SLR1Parser(all_tokens, productions)
+            
+            # Mostrar información
+            slr_parser.print_first_follow()
+            slr_parser.print_automaton()
+            
+            # Continuar procesando argumentos para parsing
+            while i < len(sys.argv):
+                if sys.argv[i] == '-t' and i + 1 < len(sys.argv):
+                    # Parsear cadena de tokens
+                    token_string = sys.argv[i + 1]
+                    test_tokens = token_string.split()
+                    result = slr_parser.parse_string(test_tokens)
+                    print(f"Resultado: {'ACEPTADA' if result else 'RECHAZADA'}")
+                    i += 2
+                elif sys.argv[i] == '-f' and i + 1 < len(sys.argv):
+                    # Parsear archivo de cadenas
+                    strings_file = sys.argv[i + 1]
+                    try:
+                        with open(strings_file, 'r') as f:
+                            for line_num, line in enumerate(f, 1):
+                                line = line.strip()
+                                if line and not line.startswith('#'):  # Ignorar comentarios
+                                    test_tokens = line.split()
+                                    print(f"\nLínea {line_num}: {line}")
+                                    result = slr_parser.parse_string(test_tokens)
+                                    print(f"Resultado: {'ACEPTADA' if result else 'RECHAZADA'}")
+                    except FileNotFoundError:
+                        print(f"Error: No se pudo encontrar el archivo {strings_file}")
+                    i += 2
+                else:
+                    i += 1
+                    
+        except Exception as e:
+            print(f"Error construyendo parser SLR(1): {e}")
+            print("Verifique que la gramática sea válida para SLR(1)")
+    
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
     
     def print_automaton(self):
         """Imprime el autómata LR(0)"""
@@ -500,7 +754,7 @@ def main():
     
     try:
         # Parsear archivo YAPar
-        parser = YAParParser()
+        parser = YALexProcessor()
         tokens, ignore_tokens, productions = parser.parse_file(yapar_file)
         
         print("=== TOKENS ===")
