@@ -442,31 +442,28 @@ class SLR1Parser:
     def _build_slr1_table(self):
         """Construye la tabla SLR(1)"""
         self.action_table = {}
-        
+
         for state_idx, state in enumerate(self.states):
             for item in state:
                 if item.is_complete():
+                    prod_idx = self.productions.index(item.production)
+
                     if item.production.left == self.augmented_start and len(item.production.right) == 1:
-                        # Item de aceptación
+                        # Aceptación: S' -> expression .
                         self.action_table[(state_idx, '$')] = ('accept', None)
-                        # Item de reducción
-                        prod_idx = self.productions.index(item.production)
+                    else:
+                        # Reducción: A -> α .
                         for terminal in self.follow_sets.get(item.production.left, set()):
                             if (state_idx, terminal) in self.action_table:
                                 print(f"Conflicto en estado {state_idx}, terminal {terminal}")
                             self.action_table[(state_idx, terminal)] = ('reduce', prod_idx)
-                    else:
-                        prod_idx = self.productions.index(item.production)
-                        for terminal in self.follow_sets.get(item.production.left, set()):
-                            if (state_idx, terminal) in self.action_table:
-                                print(f"Conflicto en estado {state_idx}, terminal {terminal}")
-                                self.action_table[(state_idx, terminal)] = ('reduce', prod_idx)
                 else:
-                    # Item de desplazamiento
+                    # Desplazamiento: A -> α • a β
                     next_sym = item.next_symbol()
                     if next_sym in self.terminals and (state_idx, next_sym) in self.goto_table:
                         target_state = self.goto_table[(state_idx, next_sym)]
                         self.action_table[(state_idx, next_sym)] = ('shift', target_state)
+
     
     def print_automaton(self):
         """Imprime el autómata LR(0)"""
