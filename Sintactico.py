@@ -195,6 +195,9 @@ class YALexProcessor:
         for alternative in alternatives:
             if alternative:
                 symbols = alternative.split()
+                for symbol in symbols:
+                    if ':' in symbol:
+                        print(f"❗ Símbolo inválido detectado: '{symbol}' en producción: {left_side} -> {alternative}")
                 production = Production(left_side, symbols)
                 self.productions.append(production)
 
